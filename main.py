@@ -3,175 +3,238 @@ import pandas as pd
 import numpy as np
 import joblib
 import plotly.graph_objects as go
+import plotly.express as px
 from datetime import datetime, timedelta
 
-# Set page config
+# Page config
 st.set_page_config(
-    page_title="Market Crash Predictor",
-    page_icon="📈",
-    layout="wide"
+    page_title="Advanced Market Crash Predictor",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-# Load the models and scaler
+# Custom CSS
+st.markdown("""
+    <style>
+    .stMetric .metric-label { font-size: 16px !important; }
+    .stAlert .alert-text { font-size: 18px !important; }
+    </style>
+""", unsafe_allow_html=True)
+
 @st.cache_resource
 def load_models():
-    try:
-        rf_model = joblib.load('random_forest_model.pkl')
-        xgb_model = joblib.load('xgboost_model.pkl')
-        scaler = joblib.load('scaler.pkl')
-        feature_names = joblib.load('feature_names.pkl')
-        return rf_model, xgb_model, scaler, feature_names
-    except Exception as e:
-        st.error(f"Error loading models: {str(e)}")
-        return None, None, None, None
+    models = {
+        'Random Forest': joblib.load('random_forest_model.pkl'),
+        'XGBoost': joblib.load('xgboost_model.pkl')
+    }
+    scaler = joblib.load('scaler.pkl')
+    feature_names = joblib.load('feature_names.pkl')
+    return models, scaler, feature_names
 
-# Preprocess data
-def preprocess_data(df, window_size=20):
-    # Calculate returns
-    returns = df.pct_change()
+def calculate_uncertainty(predictions, threshold=0.5):
+    """Calculate model uncertainty metrics"""
+    pred_std = np.std(predictions, axis=0)
+    pred_mean = np.mean(predictions, axis=0)
+    uncertainty_score = pred_std / (pred_mean + 1e-10)  # Avoid division by zero
     
-    # Create features DataFrame
-    features = pd.DataFrame(index=df.index)
-    
-    for col in df.columns:
-        # Lagged returns
-        for i in range(1, 6):
-            features[f'{col}_lag_{i}'] = returns[col].shift(i)
-        
-        # Rolling statistics with lag
-        features[f'{col}_rolling_mean'] = returns[col].rolling(window=window_size).mean().shift(1)
-        features[f'{col}_rolling_std'] = returns[col].rolling(window=window_size).std().shift(1)
-        features[f'{col}_rolling_skew'] = returns[col].rolling(window=window_size).skew().shift(1)
-        
-        # Volatility features
-        features[f'{col}_volatility'] = returns[col].rolling(window=window_size).std().shift(1)
-    
-    return features
+    confidence_level = 1 - uncertainty_score
+    return confidence_level, uncertainty_score
 
-# Make predictions
-def predict_crashes(features, models, scaler):
-    # Scale features
-    features_scaled = scaler.transform(features)
-    
-    # Get predictions from both models
-    rf_pred_proba = models[0].predict_proba(features_scaled)[:, 1]
-    xgb_pred_proba = models[1].predict_proba(features_scaled)[:, 1]
-    
-    # Ensemble predictions (average)
-    ensemble_proba = (rf_pred_proba + xgb_pred_proba) / 2
-    
-    return ensemble_proba
+def create_prediction_intervals(predictions, confidence=0.95):
+    """Create prediction intervals"""
+    lower = np.percentile(predictions, (1 - confidence) * 100 / 2, axis=0)
+    upper = np.percentile(predictions, (1 + confidence) * 100 / 2, axis=0)
+    mean = np.mean(predictions, axis=0)
+    return lower, mean, upper
 
 def main():
-    st.title("📈 Market Crash Prediction System")
+    st.title("📊 Advanced Market Crash Prediction System")
     
-    # Load models
-    rf_model, xgb_model, scaler, feature_names = load_models()
-    
-    if rf_model is None:
-        st.error("Please ensure all model files are present in the directory.")
+    # Load models and data
+    try:
+        models, scaler, feature_names = load_models()
+    except Exception as e:
+        st.error(f"Error loading models: {str(e)}")
         return
+
+    # Sidebar
+    st.sidebar.header("Configuration")
+    prediction_threshold = st.sidebar.slider(
+        "Crash Probability Threshold",
+        min_value=0.0,
+        max_value=1.0,
+        value=0.5,
+        step=0.05
+    )
     
+    confidence_level = st.sidebar.slider(
+        "Confidence Level",
+        min_value=0.8,
+        max_value=0.99,
+        value=0.95,
+        step=0.01
+    )
+
     # File upload
-    st.sidebar.header("Data Input")
-    uploaded_file = st.sidebar.file_uploader("Upload market data (CSV)", type=['csv'])
+    uploaded_file = st.sidebar.file_uploader("Upload Market Data", type=['csv'])
     
     if uploaded_file is not None:
         try:
             # Load and preprocess data
-            df = pd.read_csv(uploaded_file, header=1)
-            st.success("Data loaded successfully!")
+            df = pd.read_csv(uploaded_file)
             
-            # Show data preview
-            st.subheader("Data Preview")
-            st.dataframe(df.head())
+            # Main content area
+            tab1, tab2, tab3 = st.tabs(["Predictions", "Model Analysis", "Risk Assessment"])
             
-            # Preprocess data
-            features = preprocess_data(df)
-            
-            # Remove NaN values
-            valid_idx = ~features.isna().any(axis=1)
-            features = features[valid_idx]
-            
-            if len(features) > 0:
-                # Make predictions
-                crash_probabilities = predict_crashes(features, (rf_model, xgb_model), scaler)
+            with tab1:
+                st.subheader("Market Crash Predictions")
+                col1, col2 = st.columns([2, 1])
                 
-                # Create results DataFrame
-                results = pd.DataFrame({
-                    'Date': features.index,
-                    'Crash Probability': crash_probabilities
-                })
+                # Get predictions from both models
+                predictions = []
+                for name, model in models.items():
+                    pred = model.predict_proba(scaler.transform(df))[:, 1]
+                    predictions.append(pred)
                 
-                # Visualization
-                st.subheader("Crash Probability Over Time")
-                fig = go.Figure()
-                
-                # Add crash probability line
-                fig.add_trace(go.Scatter(
-                    x=results.index,
-                    y=results['Crash Probability'],
-                    name='Crash Probability',
-                    line=dict(color='red', width=2)
-                ))
-                
-                # Update layout
-                fig.update_layout(
-                    title='Market Crash Probability',
-                    xaxis_title='Time',
-                    yaxis_title='Probability',
-                    hovermode='x unified'
+                predictions = np.array(predictions)
+                lower, mean_pred, upper = create_prediction_intervals(
+                    predictions, confidence_level
                 )
                 
+                # Prediction plot
+                with col1:
+                    fig = go.Figure()
+                    
+                    # Add prediction interval
+                    fig.add_trace(go.Scatter(
+                        name='Upper Bound',
+                        y=upper,
+                        mode='lines',
+                        line=dict(width=0),
+                        showlegend=False
+                    ))
+                    fig.add_trace(go.Scatter(
+                        name='Lower Bound',
+                        y=lower,
+                        mode='lines',
+                        line=dict(width=0),
+                        fillcolor='rgba(68, 68, 68, 0.3)',
+                        fill='tonexty',
+                        showlegend=False
+                    ))
+                    
+                    # Add mean prediction
+                    fig.add_trace(go.Scatter(
+                        y=mean_pred,
+                        mode='lines',
+                        line=dict(color='red'),
+                        name='Mean Prediction'
+                    ))
+                    
+                    fig.update_layout(
+                        title='Crash Probability Over Time with Uncertainty',
+                        yaxis_title='Crash Probability',
+                        hovermode='x unified'
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                # Current risk metrics
+                with col2:
+                    latest_pred = mean_pred[-1]
+                    conf_level, uncert = calculate_uncertainty(predictions)
+                    
+                    # Risk gauge
+                    fig = go.Figure(go.Indicator(
+                        mode="gauge+number+delta",
+                        value=latest_pred * 100,
+                        domain={'x': [0, 1], 'y': [0, 1]},
+                        delta={'reference': 50},
+                        gauge={
+                            'axis': {'range': [0, 100]},
+                            'bar': {'color': "darkred"},
+                            'steps': [
+                                {'range': [0, 30], 'color': "lightgreen"},
+                                {'range': [30, 70], 'color': "yellow"},
+                                {'range': [70, 100], 'color': "red"}
+                            ],
+                            'threshold': {
+                                'line': {'color': "black", 'width': 4},
+                                'thickness': 0.75,
+                                'value': prediction_threshold * 100
+                            }
+                        }
+                    ))
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Metrics
+                    st.metric("Model Confidence", f"{conf_level[-1]:.2%}")
+                    st.metric("Uncertainty", f"{uncert[-1]:.2%}")
+            
+            with tab2:
+                st.subheader("Model Analysis")
+                
+                # Feature importance
+                if hasattr(models['Random Forest'], 'feature_importances_'):
+                    importances = models['Random Forest'].feature_importances_
+                    feat_imp = pd.DataFrame({
+                        'Feature': feature_names,
+                        'Importance': importances
+                    }).sort_values('Importance', ascending=False)
+                    
+                    fig = px.bar(
+                        feat_imp.head(15),
+                        x='Importance',
+                        y='Feature',
+                        orientation='h',
+                        title='Top 15 Most Important Features'
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+            
+            with tab3:
+                st.subheader("Risk Assessment")
+                
+                # Risk metrics over time
+                risk_df = pd.DataFrame({
+                    'Date': range(len(mean_pred)),
+                    'Crash Probability': mean_pred,
+                    'Uncertainty': uncert,
+                    'Model Confidence': conf_level
+                })
+                
+                # Risk metrics plot
+                fig = px.line(
+                    risk_df,
+                    x='Date',
+                    y=['Crash Probability', 'Uncertainty', 'Model Confidence'],
+                    title='Risk Metrics Over Time'
+                )
                 st.plotly_chart(fig, use_container_width=True)
                 
-                # Risk levels
-                st.subheader("Current Risk Assessment")
-                latest_prob = crash_probabilities[-1]
-                
-                if latest_prob >= 0.7:
-                    st.error(f"⚠️ High Risk (Probability: {latest_prob:.2%})")
-                elif latest_prob >= 0.4:
-                    st.warning(f"⚠️ Medium Risk (Probability: {latest_prob:.2%})")
-                else:
-                    st.success(f"✅ Low Risk (Probability: {latest_prob:.2%})")
-                
                 # Download predictions
-                st.subheader("Download Predictions")
-                csv = results.to_csv(index=False)
                 st.download_button(
-                    label="Download predictions as CSV",
-                    data=csv,
-                    file_name="crash_predictions.csv",
+                    label="Download Risk Analysis",
+                    data=risk_df.to_csv(index=False),
+                    file_name="risk_analysis.csv",
                     mime="text/csv"
                 )
                 
-            else:
-                st.error("Not enough data points after preprocessing.")
-                
         except Exception as e:
             st.error(f"Error processing data: {str(e)}")
-            
+            st.write("Please ensure your data format matches the training data.")
+    
     else:
         st.info("Please upload a CSV file to begin analysis.")
         
-    # Add information about the model
-    st.sidebar.markdown("""
-    ### About
-    This model uses ensemble learning to predict market crashes based on:
-    - Historical price data
-    - Market volatility
-    - Technical indicators
-    
-    The prediction combines results from:
-    - Random Forest
-    - XGBoost
-    
-    ### Instructions
-    1. Upload your market data CSV
-    2. Review the predictions
-    3. Monitor risk levels
-    """)
+        # Show sample format
+        st.markdown("""
+        ### Expected Data Format:
+        Your CSV should contain the following types of features:
+        - Market indices (S&P, Nasdaq, etc.)
+        - Volatility indicators
+        - Interest rates
+        - Currency rates
+        """)
 
 if __name__ == "__main__":
     main()
