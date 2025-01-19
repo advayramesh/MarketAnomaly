@@ -7,17 +7,31 @@ import plotly.express as px
 from datetime import datetime, timedelta
 
 def clean_raw_data(df):
-    """Clean the raw input data and prepare it for feature generation"""
+    """Clean the raw input data considering its specific structure"""
     try:
-        # Print initial shape
-        st.write("Initial data shape:", df.shape)
-        st.write("Initial columns:", df.columns.tolist())
+        # Get the actual column names from row 1 (0-based index)
+        actual_columns = df.iloc[1].fillna('')
         
-        # Drop unnamed columns
-        df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
-        st.write("Shape after dropping unnamed columns:", df.shape)
+        # Create a mapping of unnamed columns to actual names
+        col_mapping = {}
+        for i, col in enumerate(df.columns):
+            if col.startswith('Unnamed:'):
+                if actual_columns[i] != '':
+                    col_mapping[col] = actual_columns[i]
+                else:
+                    # Keep the last valid name for empty cells
+                    last_valid = actual_columns[i-1] if i > 0 and actual_columns[i-1] != '' else f'Column_{i}'
+                    col_mapping[col] = last_valid
+            else:
+                col_mapping[col] = col
         
-        # Convert all columns to numeric, dropping those that can't be converted
+        # Rename columns
+        df = df.rename(columns=col_mapping)
+        
+        # Skip metadata rows (first 6 rows)
+        df = df.iloc[6:].reset_index(drop=True)
+        
+        # Convert to numeric, handling errors
         numeric_df = pd.DataFrame()
         for col in df.columns:
             try:
@@ -26,29 +40,26 @@ def clean_raw_data(df):
                 st.warning(f"Dropping non-numeric column: {col}")
                 continue
         
-        # Drop columns with too many null values
-        null_threshold = len(numeric_df) * 0.5  # 50% threshold
-        numeric_df = numeric_df.dropna(axis=1, thresh=null_threshold)
-        
-        # Forward fill remaining NA values
+        # Forward fill missing values
         numeric_df = numeric_df.ffill()
         
-        # Fill any remaining NaN values with 0
+        # Fill remaining NaN with 0
         numeric_df = numeric_df.fillna(0)
         
-        st.write("Final shape after cleaning:", numeric_df.shape)
         return numeric_df
         
     except Exception as e:
         st.error(f"Error in clean_raw_data: {str(e)}")
+        st.write("DataFrame head:", df.head())
+        st.write("DataFrame info:", df.info())
         raise e
 
 def generate_features(df, window_size=20):
-    """Generate features matching the training data format"""
+    """Generate features for the cleaned data"""
     try:
         feature_df = pd.DataFrame()
         
-        # Calculate returns
+        # Calculate returns and add features
         returns = df.pct_change()
         
         for col in df.columns:
@@ -63,8 +74,11 @@ def generate_features(df, window_size=20):
             feature_df[f'{col}_rolling_std'] = returns[col].rolling(window=window_size).std()
             feature_df[f'{col}_rolling_skew'] = returns[col].rolling(window=window_size).skew()
         
-        # Forward fill any NaN values created by rolling calculations
-        feature_df = feature_df.ffill().fillna(0)
+        # Forward fill NaN values
+        feature_df = feature_df.ffill()
+        
+        # Drop rows with any remaining NaN values
+        feature_df = feature_df.dropna()
         
         return feature_df
         
@@ -72,48 +86,17 @@ def generate_features(df, window_size=20):
         st.error(f"Error in generate_features: {str(e)}")
         raise e
 
-@st.cache_resource
-def load_models():
-    try:
-        models = {
-            'Random Forest': joblib.load('random_forest_model.pkl'),
-            'XGBoost': joblib.load('xgboost_model.pkl')
-        }
-        scaler = joblib.load('scaler.pkl')
-        feature_names = joblib.load('feature_names.pkl')
-        return models, scaler, feature_names
-    except Exception as e:
-        st.error(f"Error loading models: {str(e)}")
-        return None, None, None
-
-def align_features(df, expected_features):
-    """Ensure the features match the expected format"""
-    try:
-        # Create DataFrame with expected features
-        aligned_df = pd.DataFrame(columns=expected_features)
-        
-        # Copy over matching features
-        for col in expected_features:
-            if col in df.columns:
-                aligned_df[col] = df[col]
-            else:
-                st.warning(f"Missing feature: {col}. Filling with zeros.")
-                aligned_df[col] = 0
-        
-        return aligned_df
-        
-    except Exception as e:
-        st.error(f"Error in align_features: {str(e)}")
-        raise e
-
 def main():
     st.title("📊 Market Crash Prediction System")
     
-    # Load models and expected features
-    models, scaler, feature_names = load_models()
-    
-    if models is None:
-        st.error("Failed to load models. Please check model files.")
+    # Load models
+    try:
+        rf_model = joblib.load('random_forest_model.pkl')
+        xgb_model = joblib.load('xgboost_model.pkl')
+        scaler = joblib.load('scaler.pkl')
+        feature_names = joblib.load('feature_names.pkl')
+    except Exception as e:
+        st.error(f"Error loading models: {str(e)}")
         return
     
     # File upload
@@ -121,56 +104,53 @@ def main():
     
     if uploaded_file is not None:
         try:
-            # Load raw data
+            # Load data
             df = pd.read_csv(uploaded_file)
             
-            # Show raw data info
-            st.subheader("Data Information")
+            # Show initial data info
+            st.subheader("Initial Data Information")
             st.write("Raw data shape:", df.shape)
-            st.write("Sample of raw data:")
+            st.write("First few rows:")
             st.dataframe(df.head())
             
-            # Clean raw data
+            # Clean data
             cleaned_df = clean_raw_data(df)
-            
-            # Show cleaned data info
             st.write("Cleaned data shape:", cleaned_df.shape)
-            st.write("Sample of cleaned data:")
-            st.dataframe(cleaned_df.head())
             
             # Generate features
             features_df = generate_features(cleaned_df)
+            st.write("Features data shape:", features_df.shape)
             
-            # Show generated features info
-            st.write("Generated features shape:", features_df.shape)
-            st.write("Sample of generated features:")
-            st.dataframe(features_df.head())
+            if len(features_df) == 0:
+                st.error("No valid data after preprocessing. Please check your input file.")
+                return
             
-            # Align features with expected format
-            aligned_features = align_features(features_df, feature_names)
+            # Ensure we have all required features
+            missing_features = set(feature_names) - set(features_df.columns)
+            if missing_features:
+                st.warning(f"Missing features: {missing_features}")
+                # Add missing features with zeros
+                for feature in missing_features:
+                    features_df[feature] = 0
             
-            # Show alignment info
-            st.write("Aligned features shape:", aligned_features.shape)
-            st.write("Sample of aligned features:")
-            st.dataframe(aligned_features.head())
+            # Reorder columns to match training data
+            features_df = features_df.reindex(columns=feature_names, fill_value=0)
             
             # Scale features
-            scaled_features = scaler.transform(aligned_features)
+            scaled_features = scaler.transform(features_df)
             
             # Get predictions
-            predictions = []
-            for name, model in models.items():
-                pred = model.predict_proba(scaled_features)[:, 1]
-                predictions.append(pred)
+            rf_pred = rf_model.predict_proba(scaled_features)[:, 1]
+            xgb_pred = xgb_model.predict_proba(scaled_features)[:, 1]
             
-            predictions = np.array(predictions)
-            mean_pred = np.mean(predictions, axis=0)
-            std_pred = np.std(predictions, axis=0)
+            # Combine predictions
+            mean_pred = (rf_pred + xgb_pred) / 2
+            std_pred = np.std([rf_pred, xgb_pred], axis=0)
             
-            # Visualization
+            # Create visualization
             fig = go.Figure()
             
-            # Add mean prediction
+            # Add mean prediction line
             fig.add_trace(go.Scatter(
                 y=mean_pred,
                 mode='lines',
@@ -178,7 +158,7 @@ def main():
                 line=dict(color='red', width=2)
             ))
             
-            # Add confidence intervals
+            # Add confidence bands
             fig.add_trace(go.Scatter(
                 y=mean_pred + 2*std_pred,
                 mode='lines',
@@ -222,7 +202,7 @@ def main():
             
             # Download predictions
             predictions_df = pd.DataFrame({
-                'Timestamp': range(len(mean_pred)),
+                'Date': range(len(mean_pred)),
                 'Crash_Probability': mean_pred,
                 'Uncertainty': std_pred
             })
@@ -237,11 +217,9 @@ def main():
         except Exception as e:
             st.error("Error processing data")
             st.error(f"Detailed error: {str(e)}")
-            st.write("Please check your data format and try again.")
             
     else:
         st.info("Please upload a CSV file to begin analysis.")
-        st.write("The CSV should contain market data with numeric columns.")
 
 if __name__ == "__main__":
     main()
