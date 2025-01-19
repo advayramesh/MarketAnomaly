@@ -8,41 +8,69 @@ from datetime import datetime, timedelta
 
 def clean_raw_data(df):
     """Clean the raw input data and prepare it for feature generation"""
-    # Drop unnamed columns
-    df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
-    
-    # Remove metadata rows (if any)
-    df = df[~df.iloc[:, 0].str.contains('Show/Hide|Name|Index Currency|Ticker', na=False)]
-    
-    # Convert all columns to numeric
-    for col in df.columns:
-        df[col] = pd.to_numeric(df[col], errors='coerce')
-    
-    # Forward fill missing values
-    df = df.ffill()
-    
-    return df
+    try:
+        # Print initial shape
+        st.write("Initial data shape:", df.shape)
+        st.write("Initial columns:", df.columns.tolist())
+        
+        # Drop unnamed columns
+        df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
+        st.write("Shape after dropping unnamed columns:", df.shape)
+        
+        # Convert all columns to numeric, dropping those that can't be converted
+        numeric_df = pd.DataFrame()
+        for col in df.columns:
+            try:
+                numeric_df[col] = pd.to_numeric(df[col], errors='coerce')
+            except:
+                st.warning(f"Dropping non-numeric column: {col}")
+                continue
+        
+        # Drop columns with too many null values
+        null_threshold = len(numeric_df) * 0.5  # 50% threshold
+        numeric_df = numeric_df.dropna(axis=1, thresh=null_threshold)
+        
+        # Forward fill remaining NA values
+        numeric_df = numeric_df.ffill()
+        
+        # Fill any remaining NaN values with 0
+        numeric_df = numeric_df.fillna(0)
+        
+        st.write("Final shape after cleaning:", numeric_df.shape)
+        return numeric_df
+        
+    except Exception as e:
+        st.error(f"Error in clean_raw_data: {str(e)}")
+        raise e
 
 def generate_features(df, window_size=20):
     """Generate features matching the training data format"""
-    feature_df = pd.DataFrame()
-    
-    # Calculate returns
-    returns = df.pct_change()
-    
-    for col in df.columns:
-        # Original value
-        feature_df[col] = df[col]
+    try:
+        feature_df = pd.DataFrame()
         
-        # Returns
-        feature_df[f'{col}_return'] = returns[col]
+        # Calculate returns
+        returns = df.pct_change()
         
-        # Rolling statistics
-        feature_df[f'{col}_rolling_mean'] = returns[col].rolling(window=window_size).mean()
-        feature_df[f'{col}_rolling_std'] = returns[col].rolling(window=window_size).std()
-        feature_df[f'{col}_rolling_skew'] = returns[col].rolling(window=window_size).skew()
-    
-    return feature_df
+        for col in df.columns:
+            # Original value
+            feature_df[col] = df[col]
+            
+            # Returns
+            feature_df[f'{col}_return'] = returns[col]
+            
+            # Rolling statistics
+            feature_df[f'{col}_rolling_mean'] = returns[col].rolling(window=window_size).mean()
+            feature_df[f'{col}_rolling_std'] = returns[col].rolling(window=window_size).std()
+            feature_df[f'{col}_rolling_skew'] = returns[col].rolling(window=window_size).skew()
+        
+        # Forward fill any NaN values created by rolling calculations
+        feature_df = feature_df.ffill().fillna(0)
+        
+        return feature_df
+        
+    except Exception as e:
+        st.error(f"Error in generate_features: {str(e)}")
+        raise e
 
 @st.cache_resource
 def load_models():
@@ -60,18 +88,23 @@ def load_models():
 
 def align_features(df, expected_features):
     """Ensure the features match the expected format"""
-    # Create DataFrame with expected features
-    aligned_df = pd.DataFrame(columns=expected_features)
-    
-    # Copy over matching features
-    for col in expected_features:
-        if col in df.columns:
-            aligned_df[col] = df[col]
-        else:
-            st.warning(f"Missing feature: {col}. Filling with zeros.")
-            aligned_df[col] = 0
-    
-    return aligned_df
+    try:
+        # Create DataFrame with expected features
+        aligned_df = pd.DataFrame(columns=expected_features)
+        
+        # Copy over matching features
+        for col in expected_features:
+            if col in df.columns:
+                aligned_df[col] = df[col]
+            else:
+                st.warning(f"Missing feature: {col}. Filling with zeros.")
+                aligned_df[col] = 0
+        
+        return aligned_df
+        
+    except Exception as e:
+        st.error(f"Error in align_features: {str(e)}")
+        raise e
 
 def main():
     st.title("📊 Market Crash Prediction System")
@@ -91,36 +124,40 @@ def main():
             # Load raw data
             df = pd.read_csv(uploaded_file)
             
-            # Show raw data preview
-            st.subheader("Raw Data Preview")
+            # Show raw data info
+            st.subheader("Data Information")
+            st.write("Raw data shape:", df.shape)
+            st.write("Sample of raw data:")
             st.dataframe(df.head())
             
             # Clean raw data
             cleaned_df = clean_raw_data(df)
             
+            # Show cleaned data info
+            st.write("Cleaned data shape:", cleaned_df.shape)
+            st.write("Sample of cleaned data:")
+            st.dataframe(cleaned_df.head())
+            
             # Generate features
             features_df = generate_features(cleaned_df)
+            
+            # Show generated features info
+            st.write("Generated features shape:", features_df.shape)
+            st.write("Sample of generated features:")
+            st.dataframe(features_df.head())
             
             # Align features with expected format
             aligned_features = align_features(features_df, feature_names)
             
-            # Show feature alignment status
-            st.subheader("Feature Processing")
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.write("Expected Features:", len(feature_names))
-                st.write("Generated Features:", len(aligned_features.columns))
-            
-            with col2:
-                missing_features = set(feature_names) - set(aligned_features.columns)
-                if missing_features:
-                    st.warning(f"Missing features filled with zeros: {len(missing_features)}")
+            # Show alignment info
+            st.write("Aligned features shape:", aligned_features.shape)
+            st.write("Sample of aligned features:")
+            st.dataframe(aligned_features.head())
             
             # Scale features
             scaled_features = scaler.transform(aligned_features)
             
-            # Get predictions from both models
+            # Get predictions
             predictions = []
             for name, model in models.items():
                 pred = model.predict_proba(scaled_features)[:, 1]
@@ -128,12 +165,12 @@ def main():
             
             predictions = np.array(predictions)
             mean_pred = np.mean(predictions, axis=0)
+            std_pred = np.std(predictions, axis=0)
             
             # Visualization
-            st.subheader("Crash Probability Over Time")
             fig = go.Figure()
             
-            # Add mean prediction line
+            # Add mean prediction
             fig.add_trace(go.Scatter(
                 y=mean_pred,
                 mode='lines',
@@ -141,25 +178,24 @@ def main():
                 line=dict(color='red', width=2)
             ))
             
-            # Add prediction bands
-            std_pred = np.std(predictions, axis=0)
+            # Add confidence intervals
             fig.add_trace(go.Scatter(
                 y=mean_pred + 2*std_pred,
                 mode='lines',
-                name='Upper Bound',
-                line=dict(color='gray', width=1, dash='dash')
+                line=dict(width=0),
+                showlegend=False
             ))
             
             fig.add_trace(go.Scatter(
                 y=mean_pred - 2*std_pred,
                 mode='lines',
-                name='Lower Bound',
-                line=dict(color='gray', width=1, dash='dash'),
-                fill='tonexty'
+                line=dict(width=0),
+                fill='tonexty',
+                name='95% Confidence'
             ))
             
             fig.update_layout(
-                title='Market Crash Probability with Uncertainty Bands',
+                title='Market Crash Probability Over Time',
                 yaxis_title='Probability',
                 hovermode='x unified'
             )
@@ -170,27 +206,23 @@ def main():
             latest_prob = mean_pred[-1]
             latest_std = std_pred[-1]
             
-            st.subheader("Current Risk Assessment")
             col1, col2 = st.columns(2)
             
             with col1:
-                st.metric(
-                    "Crash Probability",
-                    f"{latest_prob:.1%}",
-                    f"±{latest_std:.1%}"
-                )
+                st.metric("Crash Probability", f"{latest_prob:.1%}")
+                st.metric("Uncertainty", f"±{latest_std:.1%}")
             
             with col2:
                 if latest_prob > 0.7:
-                    st.error("High Risk Alert! 🚨")
+                    st.error("🚨 High Risk Alert!")
                 elif latest_prob > 0.3:
-                    st.warning("Medium Risk Warning ⚠️")
+                    st.warning("⚠️ Medium Risk Warning")
                 else:
-                    st.success("Low Risk Status ✅")
+                    st.success("✅ Low Risk Status")
             
             # Download predictions
             predictions_df = pd.DataFrame({
-                'Date': df.index,
+                'Timestamp': range(len(mean_pred)),
                 'Crash_Probability': mean_pred,
                 'Uncertainty': std_pred
             })
@@ -203,13 +235,13 @@ def main():
             )
             
         except Exception as e:
-            st.error(f"Error processing data: {str(e)}")
-            st.write("Detailed error information for debugging:")
-            st.write(e)
+            st.error("Error processing data")
+            st.error(f"Detailed error: {str(e)}")
+            st.write("Please check your data format and try again.")
             
     else:
         st.info("Please upload a CSV file to begin analysis.")
-        st.write("Expected features:", feature_names)
+        st.write("The CSV should contain market data with numeric columns.")
 
 if __name__ == "__main__":
     main()
