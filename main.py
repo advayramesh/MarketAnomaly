@@ -7,38 +7,36 @@ import plotly.express as px
 from datetime import datetime, timedelta
 
 def clean_raw_data(df):
-    """Clean the raw input data considering its specific structure"""
+    """Clean the raw input data with proper handling of the specific format"""
     try:
-        # Get the actual column names from row 1 (0-based index)
-        actual_columns = df.iloc[1].fillna('')
+        # Extract actual column names from row 5 (Ticker row)
+        ticker_row = df.iloc[5]
+        actual_columns = []
         
-        # Create a mapping of unnamed columns to actual names
-        col_mapping = {}
-        for i, col in enumerate(df.columns):
-            if col.startswith('Unnamed:'):
-                if actual_columns[i] != '':
-                    col_mapping[col] = actual_columns[i]
-                else:
-                    # Keep the last valid name for empty cells
-                    last_valid = actual_columns[i-1] if i > 0 and actual_columns[i-1] != '' else f'Column_{i}'
-                    col_mapping[col] = last_valid
+        for i, val in enumerate(ticker_row):
+            if pd.notna(val) and val != '':
+                actual_columns.append(val)
             else:
-                col_mapping[col] = col
+                actual_columns.append(f'Column_{i}')
         
-        # Rename columns
-        df = df.rename(columns=col_mapping)
+        # Get the data starting from row 7 (actual values start here)
+        data_df = df.iloc[7:].copy()
+        data_df.columns = actual_columns
         
-        # Skip metadata rows (first 6 rows)
-        df = df.iloc[6:].reset_index(drop=True)
-        
-        # Convert to numeric, handling errors
+        # Convert numeric columns
         numeric_df = pd.DataFrame()
-        for col in df.columns:
+        for col in data_df.columns:
             try:
-                numeric_df[col] = pd.to_numeric(df[col], errors='coerce')
+                # Replace '#N/A N/A' with NaN
+                series = data_df[col].replace('#N/A N/A', np.nan)
+                numeric_df[col] = pd.to_numeric(series, errors='coerce')
             except:
                 st.warning(f"Dropping non-numeric column: {col}")
                 continue
+        
+        # Drop columns with too many NaN values
+        thresh = len(numeric_df) * 0.5  # 50% threshold
+        numeric_df = numeric_df.dropna(axis=1, thresh=thresh)
         
         # Forward fill missing values
         numeric_df = numeric_df.ffill()
@@ -46,12 +44,13 @@ def clean_raw_data(df):
         # Fill remaining NaN with 0
         numeric_df = numeric_df.fillna(0)
         
+        # Show retained columns
+        st.write("Retained columns:", numeric_df.columns.tolist())
+        
         return numeric_df
         
     except Exception as e:
         st.error(f"Error in clean_raw_data: {str(e)}")
-        st.write("DataFrame head:", df.head())
-        st.write("DataFrame info:", df.info())
         raise e
 
 def generate_features(df, window_size=20):
@@ -59,7 +58,7 @@ def generate_features(df, window_size=20):
     try:
         feature_df = pd.DataFrame()
         
-        # Calculate returns and add features
+        # Calculate returns
         returns = df.pct_change()
         
         for col in df.columns:
@@ -77,8 +76,11 @@ def generate_features(df, window_size=20):
         # Forward fill NaN values
         feature_df = feature_df.ffill()
         
-        # Drop rows with any remaining NaN values
-        feature_df = feature_df.dropna()
+        # Fill remaining NaN with 0
+        feature_df = feature_df.fillna(0)
+        
+        # Drop first few rows where rolling calculations create NaN
+        feature_df = feature_df.iloc[window_size:]
         
         return feature_df
         
@@ -95,6 +97,9 @@ def main():
         xgb_model = joblib.load('xgboost_model.pkl')
         scaler = joblib.load('scaler.pkl')
         feature_names = joblib.load('feature_names.pkl')
+        
+        st.write("Expected features:", feature_names)
+        
     except Exception as e:
         st.error(f"Error loading models: {str(e)}")
         return
@@ -110,8 +115,6 @@ def main():
             # Show initial data info
             st.subheader("Initial Data Information")
             st.write("Raw data shape:", df.shape)
-            st.write("First few rows:")
-            st.dataframe(df.head())
             
             # Clean data
             cleaned_df = clean_raw_data(df)
@@ -125,11 +128,10 @@ def main():
                 st.error("No valid data after preprocessing. Please check your input file.")
                 return
             
-            # Ensure we have all required features
+            # Ensure all required features exist
             missing_features = set(feature_names) - set(features_df.columns)
             if missing_features:
-                st.warning(f"Missing features: {missing_features}")
-                # Add missing features with zeros
+                st.warning(f"Missing features will be filled with zeros: {missing_features}")
                 for feature in missing_features:
                     features_df[feature] = 0
             
@@ -147,7 +149,7 @@ def main():
             mean_pred = (rf_pred + xgb_pred) / 2
             std_pred = np.std([rf_pred, xgb_pred], axis=0)
             
-            # Create visualization
+            # Visualization
             fig = go.Figure()
             
             # Add mean prediction line
@@ -217,6 +219,8 @@ def main():
         except Exception as e:
             st.error("Error processing data")
             st.error(f"Detailed error: {str(e)}")
+            st.write("DataFrame info:")
+            st.write(df.info())
             
     else:
         st.info("Please upload a CSV file to begin analysis.")
