@@ -1,141 +1,84 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-from sklearn.ensemble import IsolationForest
-from sklearn.metrics import classification_report
 import joblib
-import plotly.express as px
 import plotly.graph_objects as go
 
-# Model Training Component
-def train_anomaly_detection_model(data):
-    """
-    Train an Isolation Forest model for anomaly detection
-    """
-    # Prepare features (you'll need to adjust these based on your actual data columns)
-    features = data.select_dtypes(include=[np.number]).columns
-    X = data[features]
-    
-    # Initialize and train the model
-    model = IsolationForest(contamination=0.1, random_state=42)
-    model.fit(X)
-    
-    # Save the model
-    joblib.dump(model, 'market_crash_model.pkl')
-    
-    return model
+# Load the trained model
+@st.cache_resource
+def load_model():
+    return joblib.load('market_crash_model.pkl')
 
-def create_investment_strategy(data, predictions):
-    """
-    Generate investment signals based on model predictions
-    """
-    strategy = pd.DataFrame()
-    strategy['Date'] = data.index
-    strategy['Signal'] = predictions
-    strategy['Position'] = np.where(strategy['Signal'] == -1, 'Sell', 'Buy')
-    
-    # Calculate returns (assuming you have a 'Close' price column)
-    strategy['Returns'] = data['Close'].pct_change()
-    strategy['Strategy_Returns'] = strategy['Returns'] * np.where(strategy['Position'] == 'Buy', 1, -1)
-    
-    return strategy
-
-class InvestmentBot:
-    def explain_strategy(self, prediction, confidence):
-        """
-        Generate natural language explanation of the investment strategy
-        """
-        if prediction == -1:
-            explanation = f"""
-            🔴 MARKET CRASH ALERT:
-            Our AI model has detected potential market instability.
-            
-            Recommended Actions:
-            1. Consider reducing market exposure
-            2. Review stop-loss positions
-            3. Look for defensive assets
-            
-            Confidence Level: {confidence:.2f}%
-            """
-        else:
-            explanation = f"""
-            🟢 MARKET STABLE:
-            Current market conditions appear normal.
-            
-            Recommended Actions:
-            1. Maintain regular investment strategy
-            2. Consider dollar-cost averaging
-            3. Review portfolio diversification
-            
-            Confidence Level: {confidence:.2f}%
-            """
-        return explanation
-
-# Streamlit Interface
 def main():
     st.title("Market Crash Prediction System")
     
-    # Sidebar
-    st.sidebar.header("Controls")
-    upload_file = st.sidebar.file_uploader("Upload Market Data", type=['csv'])
+    # Load model
+    try:
+        model = load_model()
+        st.success("Model loaded successfully!")
+    except:
+        st.error("Please ensure market_crash_model.pkl is in the same directory")
+        return
     
-    if upload_file is not None:
-        data = pd.read_csv(upload_file)
+    # File upload
+    uploaded_file = st.file_uploader("Upload market data", type=['csv'])
+    
+    if uploaded_file is not None:
+        # Load and preprocess data
+        data = pd.read_csv(uploaded_file)
         
-        # Data Preview
-        st.subheader("Data Preview")
-        st.write(data.head())
+        # Convert columns to numeric where possible
+        numeric_cols = []
+        for col in data.columns:
+            try:
+                data[col] = pd.to_numeric(data[col])
+                numeric_cols.append(col)
+            except:
+                continue
         
-        # Model Training Section
-        st.subheader("Model Training")
-        if st.button("Train Model"):
-            with st.spinner("Training model..."):
-                model = train_anomaly_detection_model(data)
-                st.success("Model trained successfully!")
+        # Use only numeric columns
+        data_numeric = data[numeric_cols]
         
-        # Load existing model
-        try:
-            model = joblib.load('market_crash_model.pkl')
-            
-            # Make predictions
-            features = data.select_dtypes(include=[np.number]).columns
-            predictions = model.predict(data[features])
-            scores = model.score_samples(data[features])
-            
-            # Convert scores to confidence percentages
-            confidence = (scores - scores.min()) / (scores.max() - scores.min()) * 100
-            
-            # Create investment strategy
-            strategy = create_investment_strategy(data, predictions)
-            
-            # Visualization
-            st.subheader("Market Analysis")
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=data.index, y=data['Close'], name='Price'))
-            fig.add_trace(go.Scatter(x=data.index[predictions == -1],
-                                   y=data['Close'][predictions == -1],
-                                   mode='markers',
-                                   name='Crash Detection',
-                                   marker=dict(color='red', size=10)))
-            st.plotly_chart(fig)
-            
-            # Strategy Performance
-            st.subheader("Strategy Performance")
-            cumulative_returns = (1 + strategy['Strategy_Returns']).cumprod()
-            st.line_chart(cumulative_returns)
-            
-            # AI Bot Explanation
-            st.subheader("AI Investment Bot")
-            bot = InvestmentBot()
-            latest_prediction = predictions[-1]
-            latest_confidence = confidence[-1]
-            
-            st.info(bot.explain_strategy(latest_prediction, latest_confidence))
-            
-        except FileNotFoundError:
-            st.warning("Please train the model first!")
+        # Make predictions
+        predictions = model.predict(data_numeric)
+        scores = model.score_samples(data_numeric)
+        
+        # Calculate confidence
+        confidence = (scores - scores.min()) / (scores.max() - scores.min()) * 100
+        
+        # Display results
+        st.subheader("Prediction Results")
+        
+        # Create DataFrame with results
+        results = pd.DataFrame({
+            'Prediction': ['Anomaly' if p == -1 else 'Normal' for p in predictions],
+            'Confidence': confidence
+        })
+        
+        st.write(results)
+        
+        # Visualization
+        fig = go.Figure()
+        
+        # Assuming first numeric column as main value
+        fig.add_trace(go.Scatter(
+            x=data.index,
+            y=data_numeric.iloc[:, 0],
+            name='Value',
+            line=dict(color='blue')
+        ))
+        
+        # Add anomaly points
+        anomaly_indices = np.where(predictions == -1)[0]
+        fig.add_trace(go.Scatter(
+            x=anomaly_indices,
+            y=data_numeric.iloc[anomaly_indices, 0],
+            mode='markers',
+            name='Anomaly',
+            marker=dict(color='red', size=10)
+        ))
+        
+        st.plotly_chart(fig)
 
 if __name__ == "__main__":
     main()
