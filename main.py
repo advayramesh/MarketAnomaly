@@ -1,4 +1,81 @@
-# Add this function to identify and explain assets
+import streamlit as st
+# Must be first Streamlit command
+st.set_page_config(page_title="Market Crash Prediction", layout="wide")
+
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+import plotly.express as px
+import joblib
+from datetime import datetime
+import warnings
+warnings.filterwarnings('ignore')
+
+def load_models():
+    """Load trained models and artifacts"""
+    try:
+        models = {
+            'Decision Tree': joblib.load('decision_tree_model.pkl'),
+            'Random Forest': joblib.load('random_forest_model.pkl'),
+            'XGBoost': joblib.load('xgboost_model.pkl')
+        }
+        scaler = joblib.load('scaler.pkl')
+        feature_names = joblib.load('feature_names.pkl')
+        return models, scaler, feature_names
+    except Exception as e:
+        st.warning(f"Some models could not be loaded. Running in analysis-only mode.")
+        return None, None, None
+
+def process_uploaded_data(uploaded_file):
+    """Process uploaded Bloomberg format data"""
+    try:
+        df = pd.read_csv(uploaded_file)
+        st.write("Data shape:", df.shape)
+        
+        # Extract ticker row (row 6)
+        ticker_row = df.iloc[5]
+        actual_columns = []
+        
+        for i, val in enumerate(ticker_row):
+            if pd.notna(val) and str(val).strip() != '':
+                actual_columns.append(str(val).strip())
+            else:
+                actual_columns.append(f'Asset_{i}')
+        
+        # Get data starting from row 7
+        data_df = df.iloc[7:].copy()
+        data_df.columns = actual_columns
+        
+        # Convert to numeric
+        numeric_df = pd.DataFrame()
+        for col in data_df.columns:
+            try:
+                series = data_df[col].replace(['#N/A N/A', 'N/A', ''], np.nan)
+                numeric_series = pd.to_numeric(series, errors='coerce')
+                if numeric_series.notna().sum() > len(numeric_series) * 0.5:  # Keep if >50% valid
+                    numeric_df[col] = numeric_series
+            except:
+                continue
+        
+        # Handle dates
+        try:
+            dates = pd.date_range(start='2000-01-01', periods=len(numeric_df), freq='B')
+            numeric_df.index = dates
+        except Exception as e:
+            st.error(f"Error setting dates: {str(e)}")
+            numeric_df.index = pd.date_range(start='2000-01-01', periods=len(numeric_df), freq='B')
+        
+        numeric_df = numeric_df.fillna(method='ffill').fillna(method='bfill')
+        
+        st.write("Processed data shape:", numeric_df.shape)
+        st.write("Available columns:", numeric_df.columns.tolist())
+        
+        return numeric_df
+    
+    except Exception as e:
+        st.error(f"Error processing data: {str(e)}")
+        return None
+
 def get_asset_explanations(column_name):
     """Provide explanations for common financial assets and indicators"""
     explanations = {
@@ -28,109 +105,86 @@ def get_asset_explanations(column_name):
         'GBP': 'British Pound',
         'JPY': 'Japanese Yen',
         
-        # Fixed Income Terms
-        '2Y': '2-Year Bond/Rate',
-        '5Y': '5-Year Bond/Rate',
-        '10Y': '10-Year Bond/Rate',
-        '30Y': '30-Year Bond/Rate',
-        
         # Volatility
-        'VIX': 'CBOE Volatility Index - Measures market fear',
+        'VIX': 'CBOE Volatility Index - Measures market fear'
     }
     
-    # Try to match the column name with explanations
     for key, explanation in explanations.items():
         if key.upper() in column_name.upper():
             return explanation
             
-    return "No detailed explanation available for this asset"
+    return "Financial asset or indicator"
 
-def add_market_context(fig, df, selected_cols):
-    """Add market context annotations to the plot"""
-    # Find major market events
-    returns = df[selected_cols].pct_change()
-    major_moves = returns.abs() > 0.02  # 2% daily move threshold
+def create_market_visualization(df):
+    """Create market overview visualization"""
+    if df.empty:
+        return None
     
-    for col in selected_cols:
-        major_dates = major_moves[major_moves[col]].index
-        for date in major_dates:
-            fig.add_annotation(
-                x=date,
-                y=df.loc[date, col],
-                text="Major Move",
-                showarrow=True,
-                arrowhead=1
-            )
+    # Try to identify market indices or use first few columns
+    market_cols = df.columns[:3]  # Use first 3 columns
+    
+    st.write("Plotting columns:", market_cols)
+    
+    fig = go.Figure()
+    
+    for col in market_cols:
+        # Normalize the data
+        series = df[col]
+        normalized = (series - series.mean()) / series.std()
+        
+        fig.add_trace(go.Scatter(
+            x=df.index,
+            y=normalized,
+            name=col,
+            mode='lines'
+        ))
+    
+    fig.update_layout(
+        title='Market Performance (Normalized)',
+        yaxis_title='Standard Deviations',
+        template='plotly_white',
+        height=600
+    )
     
     return fig
 
-def create_market_insights(df):
-    """Generate market insights from the data"""
-    insights = []
-    
-    # Calculate metrics
+def calculate_market_metrics(df):
+    """Calculate key market metrics"""
+    metrics = {}
     returns = df.pct_change()
-    volatility = returns.std() * np.sqrt(252)  # Annualized volatility
-    correlation = df.corr()
     
-    # Overall market trend
-    recent_trend = df.iloc[-20:].mean() > df.iloc[-40:-20].mean()
-    trend_text = "upward" if recent_trend.mean() > 0.5 else "downward"
-    insights.append(f"🎯 Recent Market Trend: The market has been trending {trend_text} over the last 20 days.")
+    # Calculate metrics safely
+    metrics['Daily Returns'] = returns.mean().mean() * 100
+    metrics['Volatility'] = returns.std().mean() * 100
     
-    # Volatility insight
-    high_vol_assets = volatility[volatility > volatility.mean()].index.tolist()
-    if high_vol_assets:
-        insights.append(f"📊 High Volatility Assets: {', '.join(high_vol_assets)} show above-average volatility.")
+    # Calculate drawdown
+    rolling_max = df.expanding().max()
+    drawdown = (df - rolling_max) / rolling_max
+    metrics['Max Drawdown'] = drawdown.min().min() * 100
     
-    # Correlation insight
-    high_corr_pairs = []
-    for i in range(len(correlation.columns)):
-        for j in range(i+1, len(correlation.columns)):
-            if correlation.iloc[i,j] > 0.8:
-                high_corr_pairs.append(f"{correlation.columns[i]} & {correlation.columns[j]}")
-    
-    if high_corr_pairs:
-        insights.append(f"🔗 Highly Correlated Pairs: {', '.join(high_corr_pairs)}")
-    
-    return insights
+    return metrics
 
 def main():
-    st.set_page_config(page_title="Market Crash Prediction", layout="wide")
-    
     st.title("📈 Market Crash Prediction System")
     
-    # Sidebar with explanations
+    # Sidebar
     st.sidebar.header("Upload Data")
     st.sidebar.markdown("""
-    ### About This System
-    This application analyzes financial market data to:
-    - 📊 Monitor market performance
-    - ⚠️ Detect potential market risks
-    - 📈 Track technical indicators
-    - 🔄 Analyze market correlations
-    
-    ### Required Data Format
-    - Bloomberg-style CSV format
-    - Headers in row 6 (Ticker names)
+    ### Data Format Requirements
+    - Bloomberg-style CSV
+    - Headers in row 6
     - Data starts from row 7
-    - Should include market indices
+    - Include market indices
     """)
     
     uploaded_file = st.sidebar.file_uploader("Choose a CSV file", type="csv")
     
     if uploaded_file is not None:
-        # Process data
+        models, scaler, feature_names = load_models()
         df = process_uploaded_data(uploaded_file)
         
         if df is not None and not df.empty:
-            # Create tabs
-            tab1, tab2, tab3, tab4 = st.tabs([
-                "Market Overview", 
-                "Asset Analysis",
-                "Risk Analysis", 
-                "Technical Indicators"
-            ])
+            tab1, tab2, tab3 = st.tabs(["Market Overview", "Asset Analysis", "Risk Analysis"])
             
             with tab1:
                 st.subheader("Market Performance")
@@ -138,13 +192,6 @@ def main():
                 if fig is not None:
                     st.plotly_chart(fig, use_container_width=True)
                 
-                # Market insights
-                st.subheader("Market Insights")
-                insights = create_market_insights(df)
-                for insight in insights:
-                    st.markdown(insight)
-                
-                # Market statistics
                 st.subheader("Market Statistics")
                 metrics = calculate_market_metrics(df)
                 
@@ -157,132 +204,37 @@ def main():
                     st.metric("Maximum Drawdown", f"{metrics['Max Drawdown']:.2f}%")
             
             with tab2:
-                st.subheader("Asset Analysis")
-                
-                # Display asset explanations
-                st.markdown("### Asset Descriptions")
+                st.subheader("Asset Information")
                 for col in df.columns:
-                    with st.expander(f"📌 {col}"):
-                        explanation = get_asset_explanations(col)
-                        st.write(explanation)
-                        
-                        # Add basic statistics
-                        stats = df[col].describe()
-                        st.markdown("#### Key Statistics")
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            st.metric("Average", f"{stats['mean']:.2f}")
-                        with col2:
-                            st.metric("Std Dev", f"{stats['std']:.2f}")
-                        with col3:
-                            st.metric("Latest", f"{df[col].iloc[-1]:.2f}")
+                    with st.expander(f"{col}"):
+                        st.write(get_asset_explanations(col))
+                        st.write("Recent value:", df[col].iloc[-1])
+                        st.line_chart(df[col])
             
             with tab3:
                 st.subheader("Risk Analysis")
                 
-                # Rolling volatility
-                returns = df.pct_change()
-                rolling_vol = returns.rolling(20).std() * np.sqrt(252)
-                
-                fig = px.line(rolling_vol, title='Annualized Rolling Volatility')
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # Risk explanation
-                st.markdown("""
-                ### Understanding Risk Metrics
-                - **Volatility**: Measures price fluctuations. Higher values indicate more uncertainty.
-                - **Correlation**: Shows how assets move together. High correlation might indicate systemic risk.
-                - **Drawdown**: Maximum loss from peak to trough. Shows worst-case scenarios.
-                """)
-                
-                # Correlation matrix
-                st.subheader("Asset Correlations")
+                # Correlation heatmap
                 corr = df.corr()
                 fig = px.imshow(corr, 
                               title='Asset Correlation Matrix',
                               color_continuous_scale='RdBu')
                 st.plotly_chart(fig, use_container_width=True)
-            
-            with tab4:
-                st.subheader("Technical Indicators")
                 
-                # Asset selection with explanation
-                st.markdown("""
-                ### Technical Analysis
-                Technical analysis uses price and volume data to identify trading opportunities.
-                Key indicators include:
-                - Moving Averages (MA): Show trend direction
-                - Relative Strength Index (RSI): Indicates overbought/oversold conditions
-                - Bollinger Bands: Show volatility and potential price extremes
-                """)
-                
-                # Select asset for technical analysis
-                selected_asset = st.selectbox("Select Asset for Analysis", df.columns.tolist())
-                
-                if selected_asset:
-                    # Calculate indicators
-                    ma_20 = df[selected_asset].rolling(window=20).mean()
-                    ma_50 = df[selected_asset].rolling(window=50).mean()
-                    std_20 = df[selected_asset].rolling(window=20).std()
-                    
-                    # Create technical analysis plot
-                    fig = go.Figure()
-                    fig.add_trace(go.Scatter(x=df.index, y=df[selected_asset], 
-                                           name='Price', mode='lines'))
-                    fig.add_trace(go.Scatter(x=df.index, y=ma_20, 
-                                           name='20-day MA', line=dict(dash='dash')))
-                    fig.add_trace(go.Scatter(x=df.index, y=ma_50, 
-                                           name='50-day MA', line=dict(dash='dot')))
-                    
-                    # Add Bollinger Bands
-                    fig.add_trace(go.Scatter(x=df.index, y=ma_20 + (std_20 * 2),
-                                           name='Upper BB', line=dict(dash='dash')))
-                    fig.add_trace(go.Scatter(x=df.index, y=ma_20 - (std_20 * 2),
-                                           name='Lower BB', line=dict(dash='dash')))
-                    
-                    fig.update_layout(title=f'{selected_asset} Technical Analysis',
-                                    height=500)
-                    st.plotly_chart(fig, use_container_width=True)
-                    
-                    # Technical Analysis Interpretation
-                    st.markdown("### Technical Analysis Interpretation")
-                    
-                    # Trend Analysis
-                    current_price = df[selected_asset].iloc[-1]
-                    ma20_last = ma_20.iloc[-1]
-                    ma50_last = ma_50.iloc[-1]
-                    
-                    trend = "Bullish" if current_price > ma20_last > ma50_last else "Bearish" if current_price < ma20_last < ma50_last else "Mixed"
-                    
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.metric("Trend", trend)
-                    with col2:
-                        st.metric("Price vs 20-day MA", f"{((current_price/ma20_last)-1)*100:.2f}%")
+                # Volatility analysis
+                returns = df.pct_change()
+                vol = returns.rolling(window=20).std() * np.sqrt(252)
+                st.line_chart(vol)
+                st.write("Higher values indicate greater market uncertainty")
         
         else:
-            st.error("Error processing the uploaded file. Please check the format.")
+            st.error("Please check your file format and try again.")
     
     else:
         st.info("Please upload a CSV file to begin analysis.")
-        
-        # Example data format
-        st.markdown("""
-        ### Understanding the Analysis
-        This system provides:
-        1. **Market Overview**: Overall market performance and trends
-        2. **Asset Analysis**: Detailed analysis of individual assets
-        3. **Risk Analysis**: Assessment of market risks and correlations
-        4. **Technical Indicators**: Advanced technical analysis tools
-        
-        ### Sample Data Format
-        Your CSV should follow Bloomberg format:
-        ```
-        Row 1-5: Metadata
-        Row 6: Column Headers (Tickers)
-        Row 7+: Daily price/value data
-        ```
-        """)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        st.error(f"An error occurred: {str(e)}")
