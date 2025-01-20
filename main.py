@@ -12,21 +12,22 @@ def load_models():
     """Load trained models and artifacts"""
     try:
         models = {
-            'Decision Tree': joblib.load('models/decision_tree_model.pkl'),
-            'Random Forest': joblib.load('models/random_forest_model.pkl'),
-            'XGBoost': joblib.load('models/xgboost_model.pkl')
+            'Decision Tree': joblib.load('decision_tree_model.pkl'),
+            'Random Forest': joblib.load('random_forest_model.pkl'),
+            'XGBoost': joblib.load('xgboost_model.pkl')
         }
-        scaler = joblib.load('models/scaler.pkl')
-        feature_names = joblib.load('models/feature_names.pkl')
+        scaler = joblib.load('scaler.pkl')
+        feature_names = joblib.load('feature_names.pkl')
         return models, scaler, feature_names
     except Exception as e:
-        st.error(f"Error loading models: {str(e)}")
+        st.warning(f"Some models could not be loaded. Running in analysis-only mode.")
         return None, None, None
 
 def process_uploaded_data(uploaded_file):
     """Process uploaded Bloomberg format data"""
     try:
         df = pd.read_csv(uploaded_file)
+        st.write("Data shape:", df.shape)
         
         # Extract ticker row
         ticker_row = df.iloc[5]
@@ -47,18 +48,28 @@ def process_uploaded_data(uploaded_file):
         for col in data_df.columns:
             try:
                 series = data_df[col].replace(['#N/A N/A', 'N/A', ''], np.nan)
-                numeric_df[col] = pd.to_numeric(series, errors='coerce')
+                numeric_series = pd.to_numeric(series, errors='coerce')
+                if numeric_series.notna().sum() > len(numeric_series) * 0.5:  # Keep if >50% valid
+                    numeric_df[col] = numeric_series
             except:
                 continue
         
         # Handle dates
         try:
-            dates = pd.to_datetime(data_df['Date'], format='%m/%d/%Y', errors='coerce')
+            if 'Date' in data_df.columns:
+                dates = pd.to_datetime(data_df['Date'], format='%m/%d/%Y', errors='coerce')
+            else:
+                dates = pd.date_range(start='2000-01-01', periods=len(numeric_df), freq='B')
             numeric_df.index = dates
-        except:
+        except Exception as e:
+            st.error(f"Error setting dates: {str(e)}")
             numeric_df.index = pd.date_range(start='2000-01-01', periods=len(numeric_df), freq='B')
         
         numeric_df = numeric_df.fillna(method='ffill').fillna(method='bfill')
+        
+        st.write("Processed data shape:", numeric_df.shape)
+        st.write("Available columns:", numeric_df.columns.tolist())
+        
         return numeric_df
     
     except Exception as e:
@@ -67,24 +78,61 @@ def process_uploaded_data(uploaded_file):
 
 def create_market_visualization(df):
     """Create market overview visualization"""
+    # Select columns for visualization
+    if df.empty:
+        return None
+        
+    # Try to identify market indices or use first few columns
+    market_cols = [col for col in df.columns 
+                  if any(market in col.upper() 
+                        for market in ['SP', 'S&P', 'NASDAQ', 'DAX', 'FTSE', 'INDEX'])]
+    
+    if not market_cols:
+        market_cols = df.columns[:3]
+    
+    st.write("Plotting columns:", market_cols)
+    
+    # Create figure
     fig = go.Figure()
     
-    for col in df.columns[:3]:
+    for col in market_cols:
+        # Normalize the data for better visualization
+        series = df[col]
+        normalized = (series - series.mean()) / series.std()
+        
         fig.add_trace(go.Scatter(
             x=df.index,
-            y=df[col],
+            y=normalized,
             name=col,
             mode='lines'
         ))
     
     fig.update_layout(
-        title='Market Performance',
-        yaxis_title='Value',
+        title='Market Performance (Normalized)',
+        yaxis_title='Standard Deviations',
         template='plotly_white',
         height=600
     )
     
     return fig
+
+def calculate_market_metrics(df):
+    """Calculate key market metrics"""
+    metrics = {}
+    
+    # Returns
+    returns = df.pct_change()
+    metrics['Daily Returns'] = returns.mean().mean() * 100
+    
+    # Volatility
+    metrics['Volatility'] = returns.std().mean() * 100
+    
+    # Drawdown
+    rolling_max = df.expanding().max()
+    drawdown = (df - rolling_max) / rolling_max
+    metrics['Max Drawdown'] = drawdown.min().min() * 100
+    
+    return metrics
 
 def main():
     st.set_page_config(page_title="Market Crash Prediction", layout="wide")
@@ -104,7 +152,7 @@ def main():
     uploaded_file = st.sidebar.file_uploader("Choose a CSV file", type="csv")
     
     if uploaded_file is not None:
-        # Load models
+        # Load models (optional)
         models, scaler, feature_names = load_models()
         
         # Process data
@@ -115,34 +163,34 @@ def main():
             tab1, tab2, tab3 = st.tabs([
                 "Market Overview", 
                 "Risk Analysis", 
-                "Predictions"
+                "Technical Indicators"
             ])
             
             with tab1:
                 st.subheader("Market Performance")
                 fig = create_market_visualization(df)
-                st.plotly_chart(fig, use_container_width=True)
+                if fig is not None:
+                    st.plotly_chart(fig, use_container_width=True)
                 
                 st.subheader("Market Statistics")
-                col1, col2, col3 = st.columns(3)
+                metrics = calculate_market_metrics(df)
                 
+                col1, col2, col3 = st.columns(3)
                 with col1:
-                    st.metric("Total Trading Days", len(df))
+                    st.metric("Average Daily Return", f"{metrics['Daily Returns']:.2f}%")
                 with col2:
-                    volatility = df.pct_change().std().mean()
-                    st.metric("Average Volatility", f"{volatility:.2%}")
+                    st.metric("Daily Volatility", f"{metrics['Volatility']:.2f}%")
                 with col3:
-                    returns = df.iloc[-1] / df.iloc[0] - 1
-                    st.metric("Total Return", f"{returns.mean():.2%}")
+                    st.metric("Maximum Drawdown", f"{metrics['Max Drawdown']:.2f}%")
             
             with tab2:
                 st.subheader("Risk Metrics")
                 
-                # Calculate risk metrics
+                # Rolling volatility
                 returns = df.pct_change()
-                rolling_vol = returns.rolling(20).std() * np.sqrt(252)
+                rolling_vol = returns.rolling(20).std() * np.sqrt(252)  # Annualized
                 
-                fig = px.line(rolling_vol, title='Annualized Volatility')
+                fig = px.line(rolling_vol, title='Annualized Rolling Volatility')
                 st.plotly_chart(fig, use_container_width=True)
                 
                 # Correlation matrix
@@ -153,12 +201,27 @@ def main():
                 st.plotly_chart(fig, use_container_width=True)
             
             with tab3:
-                if models is not None:
-                    st.subheader("Crash Predictions")
-                    # Add prediction logic here
-                    st.info("Model predictions will be added in the next update")
-                else:
-                    st.warning("Models not loaded. Please check model files.")
+                st.subheader("Technical Indicators")
+                
+                # Select asset for technical analysis
+                selected_asset = st.selectbox("Select Asset", df.columns.tolist())
+                
+                if selected_asset:
+                    # Moving averages
+                    ma_short = df[selected_asset].rolling(window=20).mean()
+                    ma_long = df[selected_asset].rolling(window=50).mean()
+                    
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(x=df.index, y=df[selected_asset], 
+                                           name='Price', mode='lines'))
+                    fig.add_trace(go.Scatter(x=df.index, y=ma_short, 
+                                           name='20-day MA', line=dict(dash='dash')))
+                    fig.add_trace(go.Scatter(x=df.index, y=ma_long, 
+                                           name='50-day MA', line=dict(dash='dot')))
+                    
+                    fig.update_layout(title=f'{selected_asset} Technical Analysis',
+                                    height=500)
+                    st.plotly_chart(fig, use_container_width=True)
         
         else:
             st.error("Error processing the uploaded file. Please check the format.")
